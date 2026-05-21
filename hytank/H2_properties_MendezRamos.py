@@ -23,6 +23,11 @@ import numpy as np
 # ==============================================================================
 from hytank.utilities.constants import MOLEC_WEIGHT_H2, UNIVERSAL_GAS_CONST
 
+# Expose the molecular weight under the same name HydrogenProperties uses
+# so this module is a drop-in for self.H2 in LH2BoilOffODE (the complex-
+# step derivative tests in tests/test_boil_off.py swap them).
+MOLEC_WEIGHT = MOLEC_WEIGHT_H2
+
 
 def gh2_P(rho, T, deriv=False):
     """

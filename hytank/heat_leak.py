@@ -168,7 +168,7 @@ class MLIHeatFlux(om.ExplicitComponent):
 
         self.add_input("T_hot", shape=(nn,), val=300, units="K")
         self.add_input("T_cold", shape=(nn,), val=20, units="K")
-        self.add_input("N_layers", val=20, units=None)
+        self.add_input("N_layers", val=20, units="unitless")
         self.add_output("heat_flux", shape=(nn,), val=1.0, units="W/m**2")
 
         arng = np.arange(nn)
