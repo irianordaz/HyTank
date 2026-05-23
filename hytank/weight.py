@@ -452,7 +452,7 @@ class MLIWeight(om.ExplicitComponent):
     def setup(self):
         self.add_input("radius", units="m")
         self.add_input("length", units="m")
-        self.add_input("N_layers")
+        self.add_input("N_layers", units="unitless")
 
         self.add_output("weight", units="kg")
 

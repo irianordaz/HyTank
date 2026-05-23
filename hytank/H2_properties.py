@@ -22,6 +22,7 @@ import scipy.interpolate as interp
 # Extension modules
 # ==============================================================================
 from hytank.H2_property_data.data_parser import get_sat_property, get_property
+from hytank.utilities.constants import MOLEC_WEIGHT_H2
 
 
 class HydrogenProperties:
@@ -38,10 +39,23 @@ class HydrogenProperties:
     analytic derivatives, while the CloughTocher2DInterpolator is finite differenced.
     """
 
+    MOLEC_WEIGHT = MOLEC_WEIGHT_H2  # kg/mol, molecular weight of hydrogen
+
+    # Subclasses (e.g., MethaneProperties) override these three to point at
+    # a different data directory and parser module. Keeping them as class
+    # attributes lets the shared __init__ build surrogates from any
+    # parallel data set in the NIST schema.
+    _data_subdir = "H2_property_data"
+    _get_sat_property = staticmethod(get_sat_property)
+    _get_property = staticmethod(get_property)
+
     def __init__(self, print_output=False):
         self._print_output = print_output
 
-        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "H2_property_data")
+        get_sat = type(self)._get_sat_property
+        get_prop = type(self)._get_property
+
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), type(self)._data_subdir)
         sat_dump_file = os.path.join(data_dir, "saturated_property_surrogate_models.pkl")
         gas_dump_file = os.path.join(data_dir, "real_gas_property_surrogate_models.pkl")
 
@@ -60,45 +74,45 @@ class HydrogenProperties:
                 print("Training saturated property surrogate models...", end="")
             t_start = time()
             self.sat_surrogates = {
-                "lh2_P": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Pressure (MPa)") * 1e6},
-                "lh2_h": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Enthalpy (l, kJ/kg)") * 1e3},
+                "lh2_P": {"x": get_sat("Temperature (K)"), "y": get_sat("Pressure (MPa)") * 1e6},
+                "lh2_h": {"x": get_sat("Temperature (K)"), "y": get_sat("Enthalpy (l, kJ/kg)") * 1e3},
                 "lh2_u": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Internal Energy (l, kJ/kg)") * 1e3,
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Internal Energy (l, kJ/kg)") * 1e3,
                 },
-                "lh2_cp": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Cp (l, J/g*K)") * 1e3},
-                "lh2_rho": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Density (l, kg/m3)")},
+                "lh2_cp": {"x": get_sat("Temperature (K)"), "y": get_sat("Cp (l, J/g*K)") * 1e3},
+                "lh2_rho": {"x": get_sat("Temperature (K)"), "y": get_sat("Density (l, kg/m3)")},
                 "lh2_k": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Therm. Cond. (l, W/m*K)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Therm. Cond. (l, W/m*K)"),
                 },
                 "lh2_viscosity": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Viscosity (l, Pa*s)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Viscosity (l, Pa*s)"),
                 },
                 "lh2_beta": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Thermal Expansion Coefficient (l, 1/K)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Thermal Expansion Coefficient (l, 1/K)"),
                 },
-                "sat_gh2_rho": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Density (v, kg/m3)")},
+                "sat_gh2_rho": {"x": get_sat("Temperature (K)"), "y": get_sat("Density (v, kg/m3)")},
                 "sat_gh2_h": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Enthalpy (v, kJ/kg)") * 1e3,
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Enthalpy (v, kJ/kg)") * 1e3,
                 },
-                "sat_gh2_cp": {"x": get_sat_property("Temperature (K)"), "y": get_sat_property("Cp (v, J/g*K)") * 1e3},
+                "sat_gh2_cp": {"x": get_sat("Temperature (K)"), "y": get_sat("Cp (v, J/g*K)") * 1e3},
                 "sat_gh2_k": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Therm. Cond. (v, W/m*K)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Therm. Cond. (v, W/m*K)"),
                 },
                 "sat_gh2_viscosity": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Viscosity (v, Pa*s)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Viscosity (v, Pa*s)"),
                 },
                 "sat_gh2_beta": {
-                    "x": get_sat_property("Temperature (K)"),
-                    "y": get_sat_property("Thermal Expansion Coefficient (v, 1/K)"),
+                    "x": get_sat("Temperature (K)"),
+                    "y": get_sat("Thermal Expansion Coefficient (v, 1/K)"),
                 },
-                "sat_gh2_T": {"x": get_sat_property("Pressure (MPa)") * 1e6, "y": get_sat_property("Temperature (K)")},
+                "sat_gh2_T": {"x": get_sat("Pressure (MPa)") * 1e6, "y": get_sat("Temperature (K)")},
             }
 
             for key, val in self.sat_surrogates.items():
@@ -136,13 +150,13 @@ class HydrogenProperties:
 
             # Get data from the NIST data tables
             vals = {}
-            vals["P"] = get_property("Pressure (MPa)", phase=phase) * 1e6  # Pa
-            vals["T"] = get_property("Temperature (K)", phase=phase)  # K
-            vals["rho"] = get_property("Density (kg/m3)", phase=phase)  # kg/m^3
-            vals["cv"] = get_property("Cv (J/g*K)", phase=phase) * 1e3  # J/(kg-K)
-            vals["cp"] = get_property("Cp (J/g*K)", phase=phase) * 1e3  # J/(kg-K)
-            vals["u"] = get_property("Internal Energy (kJ/kg)", phase=phase) * 1e3  # J/kg
-            vals["h"] = get_property("Enthalpy (kJ/kg)", phase=phase) * 1e3  # J/kg
+            vals["P"] = get_prop("Pressure (MPa)", phase=phase) * 1e6  # Pa
+            vals["T"] = get_prop("Temperature (K)", phase=phase)  # K
+            vals["rho"] = get_prop("Density (kg/m3)", phase=phase)  # kg/m^3
+            vals["cv"] = get_prop("Cv (J/g*K)", phase=phase) * 1e3  # J/(kg-K)
+            vals["cp"] = get_prop("Cp (J/g*K)", phase=phase) * 1e3  # J/(kg-K)
+            vals["u"] = get_prop("Internal Energy (kJ/kg)", phase=phase) * 1e3  # J/kg
+            vals["h"] = get_prop("Enthalpy (kJ/kg)", phase=phase) * 1e3  # J/kg
 
             surr_keys = {
                 "P": ["rho", "T"],

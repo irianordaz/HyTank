@@ -249,3 +249,5 @@ TSWLatexianTemp*
 
 # generated if using elsarticle.cls
 *.spl
+
+*.egg-info

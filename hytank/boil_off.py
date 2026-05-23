@@ -25,12 +25,31 @@ from openmdao.core.analysis_error import AnalysisError
 # Extension modules
 # ==============================================================================
 from hytank.H2_properties import HydrogenProperties
-from hytank.utilities.constants import GRAV_CONST, UNIVERSAL_GAS_CONST, MOLEC_WEIGHT_H2
+from hytank.CH4_properties import MethaneProperties
+from hytank.utilities.constants import GRAV_CONST, UNIVERSAL_GAS_CONST
 from hytank.utilities import Integrator
 
 
-# Thermophysical hydrogen properties to use in the model
-H2_prop = HydrogenProperties()
+# Lazy, per-propellant cache. Building either surrogate set is expensive
+# (CubicSpline + CloughTocher2DInterpolator training), so we share a
+# single instance across every BoilOff/LH2BoilOffODE/etc. that picks the
+# same propellant.
+_PROPELLANT_CLASSES = {
+    "LH2": HydrogenProperties,
+    "LNG": MethaneProperties,
+}
+_propellant_cache = {}
+
+
+def get_propellant(name):
+    """Return a cached propellant property instance ('LH2' or 'LNG')."""
+    if name not in _PROPELLANT_CLASSES:
+        raise ValueError(
+            f"Unknown propellant {name!r}; must be one of {list(_PROPELLANT_CLASSES)}"
+        )
+    if name not in _propellant_cache:
+        _propellant_cache[name] = _PROPELLANT_CLASSES[name]()
+    return _propellant_cache[name]
 
 # Sometimes OpenMDAO's bound enforcement doesn't work properly,
 # so enforce these bounds within compute methods to avoid divide
@@ -122,14 +141,28 @@ class BoilOff(om.Group):
             "end_cap_depth_ratio", lower=0.0, upper=1.0, default=1.0, desc="End cap depth / cylinder radius"
         )
         self.options.declare("heater_Q_add_init", default=0.0, types=float, desc="Initial heat input from heater")
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice; 'LH2' uses HydrogenProperties, 'LNG' uses MethaneProperties.",
+        )
 
     def setup(self):
         nn = self.options["num_nodes"]
+        propellant = self.options["propellant"]
+
+        # Property surrogate used by guess_nonlinear below.
+        self.H2 = get_propellant(propellant)
 
         # Compute the time derivatives of the states as a function of the states and other inputs
         self.add_subsystem(
             "ode",
-            FullODE(num_nodes=nn, end_cap_depth_ratio=self.options["end_cap_depth_ratio"]),
+            FullODE(
+                num_nodes=nn,
+                end_cap_depth_ratio=self.options["end_cap_depth_ratio"],
+                propellant=propellant,
+            ),
             promotes_inputs=[
                 "radius",
                 "length",
@@ -176,6 +209,7 @@ class BoilOff(om.Group):
                 ullage_P_init=self.options["ullage_P_init"],
                 liquid_T_init=self.options["liquid_T_init"],
                 end_cap_depth_ratio=self.options["end_cap_depth_ratio"],
+                propellant=propellant,
             ),
             promotes_inputs=["radius", "length"],
             promotes_outputs=["m_liq", "m_gas", "T_liq", "T_gas"],
@@ -280,7 +314,7 @@ class BoilOff(om.Group):
         T_liq_init = self.options["liquid_T_init"]
 
         # Check that the initial temperatures are on the correct side of the saturation point
-        T_sat = H2_prop.sat_gh2_T(P_gas_init)
+        T_sat = self.H2.sat_gh2_T(P_gas_init)
         if T_liq_init > T_sat:
             warnings.warn(
                 f"Initial liquid temperature of {T_liq_init} K is above the saturation "
@@ -295,13 +329,17 @@ class BoilOff(om.Group):
         # Compute the initial gas mass from the given initial pressure
         V_tank = 4 / 3 * np.pi * r**3 * self.options["end_cap_depth_ratio"] + np.pi * r**2 * L
         V_gas_init = V_tank * (1 - fill_init)
-        m_gas_init = H2_prop.gh2_rho(P_gas_init, T_gas_init).item() * V_gas_init
-        m_liq_init = (V_tank - V_gas_init) * H2_prop.lh2_rho(T_liq_init)
+        m_gas_init = self.H2.gh2_rho(P_gas_init, T_gas_init).item() * V_gas_init
+        m_liq_init = (V_tank - V_gas_init) * self.H2.lh2_rho(T_liq_init)
 
         def get_ode_problem(num_nodes=1):
             # Set up a problem with the ODE that can be used in an initial value problem solver
             p = om.Problem(reports=False)
-            p.model = FullODE(num_nodes=num_nodes, end_cap_depth_ratio=self.options["end_cap_depth_ratio"])
+            p.model = FullODE(
+                num_nodes=num_nodes,
+                end_cap_depth_ratio=self.options["end_cap_depth_ratio"],
+                propellant=self.options["propellant"],
+            )
 
             # Set model options so that this ODE has the same set options as the group's components
             ode_options = self.ode.boil_off_ode.options
@@ -457,7 +495,7 @@ class BoilOff(om.Group):
 
                 # Other properties that can be computed from states
                 outputs["fill_level"] = 1 - V_gas / V_tank
-                outputs["P_gas"] = H2_prop.gh2_P(m_gas / V_gas, T_gas)
+                outputs["P_gas"] = self.H2.gh2_P(m_gas / V_gas, T_gas)
 
                 # Determine the geometric properties and state rates throughout this phase
                 p_geo = get_ode_problem(num_nodes=self.options["num_nodes"])
@@ -588,10 +626,17 @@ class FullODE(om.Group):
         self.options.declare(
             "end_cap_depth_ratio", lower=0.0, upper=1.0, default=1.0, desc="End cap depth / cylinder radius"
         )
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice passed to LH2BoilOffODE.",
+        )
 
     def setup(self):
         nn = self.options["num_nodes"]
         depth_ratio = self.options["end_cap_depth_ratio"]
+        propellant = self.options["propellant"]
 
         # Compute the fill level in the tank
         self.add_subsystem(
@@ -626,7 +671,7 @@ class FullODE(om.Group):
         # Compute the ODE equations to be integrated
         self.add_subsystem(
             "boil_off_ode",
-            LH2BoilOffODE(num_nodes=nn),
+            LH2BoilOffODE(num_nodes=nn, propellant=propellant),
             promotes_inputs=[
                 "m_dot_gas_out",
                 "m_dot_liq_out",
@@ -1128,6 +1173,12 @@ class LH2BoilOffODE(om.ExplicitComponent):
         self.options.declare(
             "sigmoid_fac", default=100.0, desc="Multiplier on exponent in sigmoid for bulk boil and cloud condensation"
         )
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice; selects property surrogate and molecular weight.",
+        )
 
     def setup(self):
         # Check options
@@ -1192,10 +1243,10 @@ class LH2BoilOffODE(om.ExplicitComponent):
         # Limit on values that go in the exponent of the sigmoid functions
         self.exp_limit = 50.0
 
-        # Hydrogen property surrogate models to use. Add this as a class attribute so that it can
-        # be changed during testing to the one from Mendez Ramos's thesis, which enables
-        # complex step derivative checking.
-        self.H2 = H2_prop
+        # Propellant property surrogate models to use. Stored as a class attribute so that it can
+        # be swapped during testing to e.g. the Mendez Ramos thesis surrogates for complex step
+        # derivative checking. Defaults to LH2 (HydrogenProperties) when no option is set.
+        self.H2 = get_propellant(self.options["propellant"])
 
     def _process_inputs(self, inputs):
         """
@@ -1347,13 +1398,13 @@ class LH2BoilOffODE(om.ExplicitComponent):
         # Bulk boiling of liquid occurs when ullage pressure drops to liquid vapor pressure
         self.d_P_liq_d_T = self.H2.lh2_P(T_liq, deriv=True)
         self.m_dot_bulk_boil = (
-            MOLEC_WEIGHT_H2
+            self.H2.MOLEC_WEIGHT
             * V_gas
             / (UNIVERSAL_GAS_CONST * T_gas)
             * (
                 self.d_P_liq_d_T * self.T_dot_liq
                 - UNIVERSAL_GAS_CONST
-                / MOLEC_WEIGHT_H2
+                / self.H2.MOLEC_WEIGHT
                 * (
                     self.m_dot_gas * T_gas / V_gas
                     + m_gas * self.T_dot_gas / V_gas
@@ -1384,12 +1435,12 @@ class LH2BoilOffODE(om.ExplicitComponent):
         self.m_dot_cloud_cond = (
             P_gas
             * V_gas
-            * MOLEC_WEIGHT_H2
+            * self.H2.MOLEC_WEIGHT
             / (UNIVERSAL_GAS_CONST * T_gas**2)
             * (
                 self.d_T_sat_g_d_P
                 * UNIVERSAL_GAS_CONST
-                / MOLEC_WEIGHT_H2
+                / self.H2.MOLEC_WEIGHT
                 * (
                     self.m_dot_gas * T_gas / V_gas
                     + m_gas * self.T_dot_gas / V_gas
@@ -1949,11 +2000,11 @@ class LH2BoilOffODE(om.ExplicitComponent):
         dcc_mult__V_gas = dcc_mult__T_int * dT_int__V_gas
 
         # Derivative of m_dot_bulk_boil w.r.t. inputs
-        m_dot_bb_coeff = self.m_dot_bb_sign * MOLEC_WEIGHT_H2 * V_gas / (UNIVERSAL_GAS_CONST * T_gas)
+        m_dot_bb_coeff = self.m_dot_bb_sign * self.H2.MOLEC_WEIGHT * V_gas / (UNIVERSAL_GAS_CONST * T_gas)
         dm_dot_bb__T_dot_liq = m_dot_bb_coeff * self.d_P_liq_d_T
-        dm_dot_bb__m_dot_gas = m_dot_bb_coeff * (-UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2) * T_gas / V_gas
-        dm_dot_bb__T_dot_gas = m_dot_bb_coeff * (-UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2) * m_gas / V_gas
-        dm_dot_bb__V_dot_gas = m_dot_bb_coeff * UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2 * m_gas * T_gas / V_gas**2
+        dm_dot_bb__m_dot_gas = m_dot_bb_coeff * (-UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT) * T_gas / V_gas
+        dm_dot_bb__T_dot_gas = m_dot_bb_coeff * (-UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT) * m_gas / V_gas
+        dm_dot_bb__V_dot_gas = m_dot_bb_coeff * UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT * m_gas * T_gas / V_gas**2
 
         dm_dot_bb__Q_add = (
             dm_dot_bb__T_dot_liq * J["T_dot_liq", "Q_add"]
@@ -1979,7 +2030,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + dm_dot_bb__T_dot_gas * J["T_dot_gas", "m_gas"]
             + dm_dot_bb__V_dot_gas * J["V_dot_gas", "m_gas"]
             + m_dot_bb_coeff
-            * (-UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2)
+            * (-UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT)
             * (self.T_dot_gas / V_gas - T_gas * self.V_dot_gas / V_gas**2)
         )
         dm_dot_bb__T_gas = (
@@ -1989,7 +2040,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + dm_dot_bb__V_dot_gas * J["V_dot_gas", "T_gas"]
             - self.m_dot_bulk_boil / T_gas  # first product rule term
             + m_dot_bb_coeff
-            * (-UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2)
+            * (-UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT)
             * (self.m_dot_gas / V_gas - m_gas * self.V_dot_gas / V_gas**2)  # second product rule term
         )
         dm_dot_bb__V_gas = (
@@ -1999,7 +2050,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + dm_dot_bb__V_dot_gas * J["V_dot_gas", "V_gas"]
             + self.m_dot_bulk_boil / V_gas  # first product rule term
             + m_dot_bb_coeff
-            * (-UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2)
+            * (-UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT)
             * (
                 -self.m_dot_gas * T_gas / V_gas**2
                 - m_gas * self.T_dot_gas / V_gas**2
@@ -2027,12 +2078,12 @@ class LH2BoilOffODE(om.ExplicitComponent):
         )
 
         # Derivative of m_dot_cloud_cond w.r.t. inputs
-        m_dot_cc_coeff = self.m_dot_cc_sign * self.P_gas * V_gas * MOLEC_WEIGHT_H2 / (UNIVERSAL_GAS_CONST * T_gas**2)
+        m_dot_cc_coeff = self.m_dot_cc_sign * self.P_gas * V_gas * self.H2.MOLEC_WEIGHT / (UNIVERSAL_GAS_CONST * T_gas**2)
         #                  first product rule term
         dm_dot_cc__P_gas = self.m_dot_cloud_cond / self.P_gas + m_dot_cc_coeff * (
             self.H2.sat_gh2_T(self.P_gas, deriv=2)
             * UNIVERSAL_GAS_CONST
-            / MOLEC_WEIGHT_H2
+            / self.H2.MOLEC_WEIGHT
             * (
                 self.m_dot_gas * T_gas / V_gas
                 + m_gas * self.T_dot_gas / V_gas
@@ -2040,13 +2091,13 @@ class LH2BoilOffODE(om.ExplicitComponent):
             )
         )  # second product rule term
         dm_dot_cc__m_dot_gas = (
-            m_dot_cc_coeff * self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2 * T_gas / V_gas
+            m_dot_cc_coeff * self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT * T_gas / V_gas
         )
         dm_dot_cc__T_dot_gas = m_dot_cc_coeff * (
-            self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2 * m_gas / V_gas - 1
+            self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT * m_gas / V_gas - 1
         )
         dm_dot_cc__V_dot_gas = (
-            m_dot_cc_coeff * self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / MOLEC_WEIGHT_H2 * (-m_gas * T_gas / V_gas**2)
+            m_dot_cc_coeff * self.d_T_sat_g_d_P * UNIVERSAL_GAS_CONST / self.H2.MOLEC_WEIGHT * (-m_gas * T_gas / V_gas**2)
         )
 
         dm_dot_cc__Q_add = (
@@ -2073,7 +2124,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + m_dot_cc_coeff
             * self.d_T_sat_g_d_P
             * UNIVERSAL_GAS_CONST
-            / MOLEC_WEIGHT_H2
+            / self.H2.MOLEC_WEIGHT
             * (self.m_dot_gas / V_gas - m_gas * self.V_dot_gas / V_gas**2)  # second product rule term
         )
         dm_dot_cc__T_liq = (
@@ -2090,7 +2141,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + m_dot_cc_coeff
             * self.d_T_sat_g_d_P
             * UNIVERSAL_GAS_CONST
-            / MOLEC_WEIGHT_H2
+            / self.H2.MOLEC_WEIGHT
             * (
                 -self.m_dot_gas * T_gas / V_gas**2
                 - m_gas * self.T_dot_gas / V_gas**2
@@ -2113,7 +2164,7 @@ class LH2BoilOffODE(om.ExplicitComponent):
             + m_dot_cc_coeff
             * self.d_T_sat_g_d_P
             * UNIVERSAL_GAS_CONST
-            / MOLEC_WEIGHT_H2
+            / self.H2.MOLEC_WEIGHT
             * (self.T_dot_gas / V_gas - T_gas * self.V_dot_gas / V_gas**2)
         )
         dm_dot_cc__Q_gas = dm_dot_cc__T_dot_gas * J["T_dot_gas", "Q_gas"]
@@ -2476,14 +2527,6 @@ class InitialTankStateModification(om.ExplicitComponent):
         End cap depth divided by cylinder radius. 1 gives hemisphere, 0.5 gives 2:1 semi ellipsoid.
         Must be in the range 0-1 (inclusive). By default 1.0.
     """
-    def __init__(self, **kwargs):
-        # Hydrogen property surrogate models to use. Add this as a class attribute so that it can
-        # be changed during testing to the one from Mendez Ramos's thesis, which enables
-        # complex step derivative checking.
-        self.H2 = H2_prop
-
-        super().__init__(**kwargs)
-
     def initialize(self):
         self.options.declare("num_nodes", default=1, desc="Number of design points to run")
         self.options.declare("fill_level_init", default=0.95, desc="Initial fill level")
@@ -2493,8 +2536,18 @@ class InitialTankStateModification(om.ExplicitComponent):
         self.options.declare(
             "end_cap_depth_ratio", lower=0.0, upper=1.0, default=1.0, desc="End cap depth / cylinder radius"
         )
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice; selects property surrogate.",
+        )
 
     def setup(self):
+        # Propellant property surrogate models. Stored as an instance attribute so a test can
+        # swap in e.g. the Mendez Ramos thesis surrogates for complex step derivative checking.
+        self.H2 = get_propellant(self.options["propellant"])
+
         nn = self.options["num_nodes"]
 
         r_default = 1.0
@@ -2515,10 +2568,20 @@ class InitialTankStateModification(om.ExplicitComponent):
 
         # Get reasonable default values for states
         defaults = self._compute_initial_states(r_default, L_default, self.options)
+
+        # State temperature bounds depend on the propellant operating
+        # regime: LH2 stays near 14-33 K, LNG (methane) near 90-190 K.
+        if self.options["propellant"] == "LNG":
+            T_gas_lower, T_gas_upper = 88.0, 200.0
+            T_liq_lower, T_liq_upper = 88.0, 120.0
+        else:  # LH2
+            T_gas_lower, T_gas_upper = 18.0, 150.0
+            T_liq_lower, T_liq_upper = 14.0, 33.0
+
         self.add_output("m_gas", shape=(nn,), units="kg", lower=1e-6, val=defaults["m_gas_init"], upper=1e4)
         self.add_output("m_liq", shape=(nn,), units="kg", lower=1e-2, val=defaults["m_liq_init"], upper=1e6)
-        self.add_output("T_gas", shape=(nn,), units="K", lower=18, val=defaults["T_gas_init"], upper=150)
-        self.add_output("T_liq", shape=(nn,), units="K", lower=14, val=defaults["T_liq_init"], upper=33)
+        self.add_output("T_gas", shape=(nn,), units="K", lower=T_gas_lower, val=defaults["T_gas_init"], upper=T_gas_upper)
+        self.add_output("T_liq", shape=(nn,), units="K", lower=T_liq_lower, val=defaults["T_liq_init"], upper=T_liq_upper)
         self.add_output("V_gas", shape=(nn,), units="m**3", lower=1e-5, val=defaults["V_gas_init"], upper=1e4)
 
         arng = np.arange(nn)

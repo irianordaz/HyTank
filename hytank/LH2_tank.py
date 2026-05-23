@@ -153,6 +153,12 @@ class LH2Tank(om.Group):
         self.options.declare("outer_safety_factor", default=2.0, desc="Safety factor on outer wall thickness")
         self.options.declare("outer_youngs_modulus", default=8.0e10, desc="Young's modulus of outer wall material, Pa")
         self.options.declare("outer_density", default=2699.0, desc="Density of outer wall material in kg/m^3")
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice; passed through to the thermal model.",
+        )
 
     def setup(self):
         nn = self.options["num_nodes"]
@@ -205,6 +211,7 @@ class LH2Tank(om.Group):
                 liquid_T_init=self.options["liquid_T_init"],
                 heat_multiplier=self.options["heat_multiplier"],
                 heater_Q_add_init=self.options["heater_Q_add_init"],
+                propellant=self.options["propellant"],
             ),
             promotes_inputs=["radius", "length", "P_heater", "m_dot_gas_out", "m_dot_liq_out", "T_env", "N_layers"],
             promotes_outputs=["m_gas", "m_liq", "T_gas", "T_liq", "P", "fill_level"],
@@ -212,7 +219,7 @@ class LH2Tank(om.Group):
 
         # Set default for some inputs
         self.set_input_defaults("radius", 1.0, units="m")
-        self.set_input_defaults("N_layers", 20)
+        self.set_input_defaults("N_layers", 20, units="unitless")
         self.set_input_defaults("P_heater", np.zeros(nn), units="W")
         self.set_input_defaults("vacuum_gap", 5, units="cm")
 
@@ -304,6 +311,12 @@ class LH2TankThermals(om.Group):
             "end_cap_depth_ratio", lower=0.0, upper=1.0, default=1.0, desc="End cap depth / cylinder radius"
         )
         self.options.declare("heater_Q_add_init", default=0.0, types=float, desc="Initial heat input from heater")
+        self.options.declare(
+            "propellant",
+            default="LH2",
+            values=("LH2", "LNG"),
+            desc="Propellant choice; passed through to the BoilOff subsystem.",
+        )
 
     def setup(self):
         nn = self.options["num_nodes"]
@@ -326,6 +339,7 @@ class LH2TankThermals(om.Group):
                 liquid_T_init=self.options["liquid_T_init"],
                 end_cap_depth_ratio=self.options["end_cap_depth_ratio"],
                 heater_Q_add_init=self.options["heater_Q_add_init"],
+                propellant=self.options["propellant"],
             ),
             promotes_inputs=["radius", "length", "m_dot_gas_out", "m_dot_liq_out", "P_heater"],
             promotes_outputs=["m_gas", "m_liq", "T_gas", "T_liq", ("P_gas", "P"), "fill_level"],
@@ -339,7 +353,7 @@ class LH2TankThermals(om.Group):
 
         # Set default for some inputs
         self.set_input_defaults("radius", 1.0, units="m")
-        self.set_input_defaults("N_layers", 20)
+        self.set_input_defaults("N_layers", 20, units="unitless")
         self.set_input_defaults("P_heater", np.zeros(nn), units="W")
         self.set_input_defaults("T_env", np.full(nn, 273), units="K")
         self.set_input_defaults("T_liq", np.full(nn, 25), units="K")
